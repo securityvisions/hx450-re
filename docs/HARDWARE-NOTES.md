@@ -103,3 +103,32 @@ problems in the client, not protocol problems. The studio app now:
 
 Measured after the change: pushes at `14:23:01`, `14:24:02`, `14:25:02` — i.e.
 the panel changes about a second after each minute ticks over.
+
+
+## 6. Per-key colour write (`04 23`) — attempted, not confirmed
+
+Following the recovered sequence from the atlas:
+
+```
+04 18 ✓ → 04 13 ✓ → mode block (80 … brightness … AA 55) → 04 02 → 04 F0
+04 18 ✓ → 04 23 ✓ ([8]=0x09) → 576-byte table (144 × [k][R][G][B]) → 04 02 → 04 F0
+```
+
+The 576 bytes went out byte-identically to the recovered builder, but the
+reply statuses came back `0x00` ("no verdict") for the begin/per-key/commit of
+the second transaction. Note that `0x00` is **not proof of rejection**: the
+firmware's reply queue lags, so a status can belong to the previous command.
+The follow-up `04 F5` read returned 144 records that did not match the written
+pattern (`(0,142,96)`, `(81,76,0)`, `(28,26,0)`, … decreasing values that look
+like a sampled animation), which is consistent with either
+(a) the write being ignored, or
+(b) the readback reporting the *playing* effect rather than the stored table.
+
+**Verdict [U]:** the per-key table framing is known from the binary, but this
+experiment neither confirms nor refutes it on hardware. Settling it needs the
+vendor app in the loop: set a visually obvious per-key pattern in the vendor UI,
+then read `04 F5` immediately and compare — that isolates the readback transform
+from the write path.
+
+The keyboard was restored to a known-good state afterwards
+(`Static`, magenta, brightness 5 — statuses `ok`/`ok`/`ok`).
