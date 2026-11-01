@@ -130,3 +130,15 @@ Caveats worth keeping:
 
 Doing this by hand? Use 30 s apart at most, and finish with a normal lighting
 mode to leave per-key mode, or the keyboard stays on the painted static colour.
+
+
+## 7. `04 28` (RTC) immediately before an upload breaks the upload
+
+Found while wiring `--sync-clock`: sending the clock block right before a screen
+upload makes the panel reject the **first page** (`page 1/N was not acknowledged`,
+reproduced three times). The same payload without the clock command uploads fine,
+and the clock command succeeds on its own.
+
+Workaround, and what both tools now do: push the frame first, wait ~1 s, then
+send `04 28`. Worth remembering for any future batching — the RTC block leaves
+the device in a state where the next page transaction is refused.
