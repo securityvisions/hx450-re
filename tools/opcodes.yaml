@@ -1,0 +1,177 @@
+# opcodes.yaml -- candidate control-channel opcodes for the HISKA HX-KEG450
+#
+# Data file for probe.py. One entry per candidate `04 xx` command on the
+# 0xFF13 control interface (64-byte FEATURE reports, 65-byte ioctl buffer).
+#
+# Schema (a strict YAML subset parsed by probe.py's stdlib-only loader):
+#
+#   version: 1                  # scalar, informational
+#   hard_deny:                  # list of {opcode, reason}; never sent, no override
+#     - opcode: "04 0F"
+#       reason: "..."
+#   opcodes:                    # list of command records
+#     - opcode: "04 18"         # 2 hex bytes, "XX YY"
+#       name: "begin"           # short label
+#       risk: "cosmetic"        # read-only | cosmetic | state-changing | dangerous
+#       payload: ""             # bytes AFTER the 2-byte opcode, hex; zero-padded to 64
+#       expected: "echo ... 0x01"
+#       source: "where this came from"
+#       notes: "operational caveats"
+#       one_shot_poison: false  # optional bool: destroys the open connection
+#
+# Risk meanings:
+#   read-only       no persistent device state changes; safe on an open channel
+#   cosmetic        session-only / visible-only; needs a later commit (04 02) to persist
+#   state-changing  persists settings (clock, remap, colours, macros, flash commits)
+#   dangerous       erase / reset / firmware-adjacent or unknown-destructive: REFUSED
+#
+# Wire format reminder (see ../hiska-keg450-lcd/docs/PROTOCOL.md):
+#   report = 65 bytes on the wire = 0x00 report id + 64-byte payload
+#   payload[0:2] = 04 xx opcode, reply payload[3] = status (01 ok / FF rejected / 00 none)
+#   space commands 35 ms apart; leave >=1 ms between SET and GET.
+
+version: 1
+
+hard_deny:
+  - opcode: "04 0F"
+    reason: "factory reset / erase (AK820 dongle cmd 0x0F); semantics unverified on wired HX-KEG450 -- can destroy user config"
+  - opcode: "04 7F"
+    reason: "reserved / firmware-adjacent; AK820 uses 0x7F as a 2.4 GHz header, over wired it is unknown and may be an erase/bootloader opcode"
+
+opcodes:
+  - opcode: "04 18"
+    name: "begin"
+    risk: "cosmetic"
+    payload: ""
+    expected: "echo 04 18 00 01 -- reply byte 3 = 0x01 (accepted)"
+    source: "docs/PROTOCOL.md section 3 (verified vendor capture); working code hiska-keg450-lcd/keg450.py Device.command(0x04, 0x18)"
+    notes: "Opens a command transaction. Alone it changes nothing persistent; close a partial transaction with 04 F0."
+
+  - opcode: "04 72"
+    name: "screen metadata"
+    risk: "cosmetic"
+    payload: "00 00 00 00 00 00 08 00"
+    expected: "echo 04 72 00 01 -- reply byte 3 = 0x01 (accepted)"
+    source: "docs/PROTOCOL.md section 4 (verified); keg450.py upload_payload(); REPORT.md section on screen upload"
+    notes: "payload[0]=slot (0x00 seen from this vendor tool; 0x01/0x02/0x03 seen on sibling firmware), payload[6:8]=page count LE16 (template = 8 pages = one 160x96 frame). Does not persist without page data + 04 02; a commit after a partial stream must never be sent."
+
+  - opcode: "04 02"
+    name: "commit"
+    risk: "state-changing"
+    payload: ""
+    expected: "echo 04 02 00 01 -- reply byte 3 = 0x01 (accepted)"
+    source: "docs/PROTOCOL.md sections 3-5 (verified); keg450.py upload_payload()/set_light()"
+    notes: "Commits the pending transaction to flash (wear is assumed but unmeasured -- keep commits rare). Only safe after a complete transaction; never send after a partial image/keymap/macro stream."
+
+  - opcode: "04 F0"
+    name: "end"
+    risk: "cosmetic"
+    payload: ""
+    expected: "04 F0 echo, often with byte 3 = 0x00 (no verdict) or 0x01 (accepted)"
+    source: "docs/PROTOCOL.md section 3 (vendor tool sends it); AK820 spec section 7 says end-session; AKS075 reports it can restart the GIF player and break flash persistence"
+    notes: "Session close. Contradictory sibling reports: harmless session end on AK820, possibly harmful right after a screen commit on AKS075. Use only to close a partial transaction."
+
+  - opcode: "04 13"
+    name: "lighting entry"
+    risk: "cosmetic"
+    payload: "00 00 00 00 00 00 01"
+    expected: "echo 04 13 00 01 -- reply byte 3 = 0x01 (accepted)"
+    source: "docs/PROTOCOL.md section 5 (verified); keg450.py Device.set_light()"
+    notes: "payload[6] (wire byte 8) MUST be 0x01 or the firmware silently ignores the later commit. Entry only: needs one 64-byte lighting data block and 04 02 to have any effect."
+
+  - opcode: "04 28"
+    name: "clock sync"
+    risk: "state-changing"
+    payload: "1A 0A 01 0E 1E 05"
+    expected: "echo 04 28 00 01 -- reply byte 3 = 0x01 (accepted)"
+    source: "docs/PROTOCOL.md section 3 (sent once by the vendor tool, effect unverified); keg450.py Device.clock_sync() uses payload = yy mm dd hh mm ss"
+    notes: "PROTOCOL AMBIGUITY: the HX-KEG450 vendor capture puts yy mm dd hh mm ss in payload[0:6], while AK820/AULA/AKS075 send a clock DATA BLOCK instead (payload = 00 <slot> 5A yy mm dd hh mm ss 00 <dow> ...). Template is the example time 2026-10-01 14:30:05 -- override with --payload to set the real clock. Wrong bytes here cannot corrupt the screen."
+
+  - opcode: "04 F5"
+    name: "read key colours / heartbeat"
+    risk: "read-only"
+    payload: "00 00 00 00 00 00 09"
+    expected: "ACK 04 F5 00 01, then up to 9 x 64-byte data reports (FEAT_QUERY: one GET_FEATURE per packet)"
+    source: "docs/PROTOCOL.md section 3 (vendor tool sends 04 F5 ... 09 every ~30 ms as a heartbeat); AK820 spec section 7.8 (read current per-key colours, returned layout [key, R, G, B] x 16)"
+    notes: "payload[6] (wire byte 8) = number of 64-byte data packets. Read-only; use the `poll` subcommand, not `send`, to collect the multi-packet reply. The vendor follows it with 04 02; probe.py deliberately does not auto-commit a read."
+
+  - opcode: "04 05"
+    name: "device info"
+    risk: "read-only"
+    payload: ""
+    expected: "ACK 04 05 00 01, then a second read with a payload block; AULA EA75 reports VID/PID little-endian at payload[4:8] (e.g. 45 0C 0A 80 = 0C45:800A)"
+    source: "AULA EA75 Max PROTOCOL.md (measured on hardware) via REPORT.md section 3; listed as a candidate for HX-KEG450 in REPORT.md"
+    notes: "ONE-SHOT QUIRK: after 04 05 every further control command on that open connection returns 0xFF until the node is closed and reopened. Run it LAST on a throwaway open, never before an upload. probe.py warns but cannot undo the poisoning without reopening (CLI opens once per run, so each invocation is a fresh connection)."
+    one_shot_poison: true
+
+  - opcode: "04 11"
+    name: "base-layer key map"
+    risk: "state-changing"
+    payload: ""
+    expected: "echo 04 11 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.4 (576-byte key table, 9 packets, header payload[6]=9); static-re task-1 scope (find every 04 xx in DeviceDriver.exe); REPORT.md candidate list"
+    notes: "Header-only probe: payload[6] (wire byte 8) is the number of 64-byte data packets that follow; template leaves it 0 so the firmware is not left waiting for a table. A full write needs 576 bytes + 04 02 and can remap every key -- do not commit unless you have a known-good table. F75 firmware labels 04 11 as a reset, so semantics differ across OEM builds."
+
+  - opcode: "04 27"
+    name: "Fn-layer key map"
+    risk: "state-changing"
+    payload: ""
+    expected: "echo 04 27 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.4 (Fn layer key table); static-re task-1 scope; REPORT.md candidate list"
+    notes: "Same shape as 04 11 for the Fn layer. Header-only probe; no commit."
+
+  - opcode: "04 15"
+    name: "macro memory"
+    risk: "state-changing"
+    payload: ""
+    expected: "echo 04 15 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.5 (macro image, preceded by 04 19); F75 code labels 04 15 as 'erase display slots'; static-re task-1 scope"
+    notes: "SEMANTIC SPLIT: macro memory on AK820 vs display-slot erase on F75 firmware. Header-only probe (payload[6]=0); do not follow with a data block + 04 02 blindly."
+
+  - opcode: "04 19"
+    name: "macro upload begin"
+    risk: "cosmetic"
+    payload: ""
+    expected: "echo 04 19 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.5 (begin macro upload); F75 code labels 04 19 as 'erase display memory'; static-re task-1 scope"
+    notes: "Session-only begin on AK820, but F75 calls it erase-display-memory. No commit is sent by this probe, so worst case is a session that should be closed with 04 F0."
+
+  - opcode: "04 17"
+    name: "system settings"
+    risk: "state-changing"
+    payload: "01 00 00 00 00 00 01"
+    expected: "echo 04 17 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.3 (payload[0]=0x01 sub-command, payload[6]=1 data packet); F75 labels 04 17 as a reset; static-re task-1 scope"
+    notes: "Header-only probe (declares 1 packet but none is sent -- the firmware should ignore or stay idle; close with 04 F0 if it complains). Settings include sleep time / key response / Win-key lock on AK820."
+
+  - opcode: "04 23"
+    name: "per-key static colours"
+    risk: "state-changing"
+    payload: ""
+    expected: "echo 04 23 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.6 (576-byte [key,R,G,B] table, 9 packets); static-re task-1 scope; REPORT.md candidate list"
+    notes: "Writes the 'User Lighting' table; persists with 04 02. Header-only probe (payload[6]=0). Full write needs 9 packets of 64 bytes."
+
+  - opcode: "04 20"
+    name: "per-key real-time frame"
+    risk: "cosmetic"
+    payload: ""
+    expected: "echo 04 20 00 01 if accepted (unverified for HX-KEG450)"
+    source: "AK820 spec section 7.7 (512-byte streaming frame, 8 packets, no 04 18/04 F0 wrapper); static-re task-1 scope"
+    notes: "Streaming per-key RGB frame; does not persist on its own. Header-only probe (payload[6]=0). Fast timing (5 ms) on the vendor side matters for the real stream."
+
+  - opcode: "04 0F"
+    name: "factory reset / erase"
+    risk: "dangerous"
+    payload: ""
+    expected: "n/a -- probe.py refuses to send this"
+    source: "AK820 spec section 4.2 / section 8.12 (2.4 GHz cmd 0x0F is sent at the start of factory reset); unverified over wired HX-KEG450"
+    notes: "Never send on this model with the current knowledge. Listed so the risk is explicit and so `opcodes` shows it as hard-denied."
+
+  - opcode: "04 7F"
+    name: "reserved / firmware-adjacent"
+    risk: "dangerous"
+    payload: ""
+    expected: "n/a -- probe.py refuses to send this"
+    source: "AK820 spec section 7.10 (2.4 GHz screen upload header uses 0x7F); wired semantics unknown; firmware-re task-2 investigates update paths"
+    notes: "Never send: could be an erase / bootloader-adjacent opcode on this firmware."
