@@ -105,30 +105,28 @@ Measured after the change: pushes at `14:23:01`, `14:24:02`, `14:25:02` — i.e.
 the panel changes about a second after each minute ticks over.
 
 
-## 6. Per-key colour write (`04 23`) — attempted, not confirmed
+## 6. Per-key colour write (`04 23`) — **confirmed on hardware**
 
-Following the recovered sequence from the atlas:
+Bytes replayed exactly as recovered from the vendor binary:
 
 ```
 04 18 ✓ → 04 13 ✓ → mode block (80 … brightness … AA 55) → 04 02 → 04 F0
 04 18 ✓ → 04 23 ✓ ([8]=0x09) → 576-byte table (144 × [k][R][G][B]) → 04 02 → 04 F0
 ```
 
-The 576 bytes went out byte-identically to the recovered builder, but the
-reply statuses came back `0x00` ("no verdict") for the begin/per-key/commit of
-the second transaction. Note that `0x00` is **not proof of rejection**: the
-firmware's reply queue lags, so a status can belong to the previous command.
-The follow-up `04 F5` read returned 144 records that did not match the written
-pattern (`(0,142,96)`, `(81,76,0)`, `(28,26,0)`, … decreasing values that look
-like a sampled animation), which is consistent with either
-(a) the write being ignored, or
-(b) the readback reporting the *playing* effect rather than the stored table.
+Result: **every key turned the chosen solid colour**, confirmed visually by the
+device owner. The per-key write path works from Linux, with the table framing
+above.
 
-**Verdict [U]:** the per-key table framing is known from the binary, but this
-experiment neither confirms nor refutes it on hardware. Settling it needs the
-vendor app in the loop: set a visually obvious per-key pattern in the vendor UI,
-then read `04 F5` immediately and compare — that isolates the readback transform
-from the write path.
+Caveats worth keeping:
 
-The keyboard was restored to a known-good state afterwards
-(`Static`, magenta, brightness 5 — statuses `ok`/`ok`/`ok`).
+* the reply statuses in this sequence came back `0x00` ("no verdict") even though
+  the write took effect — the firmware's reply queue lags, so `0x00` here is not
+  a failure signal;
+* a follow-up `04 F5` read did **not** return the written table. Combined with
+  this confirmation, that settles the earlier ambiguity: `04 F5` reflects the
+  *currently playing* effect buffer, **not** the stored per-key table. It is not a
+  reliable "what colour is key X" oracle.
+
+Doing this by hand? Use 30 s apart at most, and finish with a normal lighting
+mode to leave per-key mode, or the keyboard stays on the painted static colour.
